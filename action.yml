@@ -150,9 +150,9 @@ runs:
         #
         #===================================== Invoke the upload script ========================================
         #
-        # Invoke upload.sh using its absolute path so the script runs with GITHUB_WORKSPACE
-        # as the working directory. This ensures relative artifact paths (e.g. dist/*.zip)
-        # are resolved against the workspace root, not the action's own directory.
+        # Invoke upload.sh using its absolute path to ensure the script is found regardless
+        # of the current working directory. The runner sets the working directory to
+        # GITHUB_WORKSPACE by default, so relative artifact paths resolve correctly.
         # All parameters are already available as INPUT_* env vars — no CLI args needed.
         chmod +x "${{ github.action_path }}/upload.sh"
         bash "${{ github.action_path }}/upload.sh"
