@@ -84,7 +84,7 @@ RATE_LIMIT_WAIT="60"
 STEPS="[\033[95m STEPS \033[0m]"
 INFO="[\033[94m INFO \033[0m]"
 NOTE="[\033[93m NOTE \033[0m]"
-WARN="[\033[91m WARN  \033[0m]"
+WARN="[\033[91m WARN \033[0m]"
 ERROR="[\033[91m ERROR \033[0m]"
 SUCCESS="[\033[92m SUCCESS \033[0m]"
 # Semantic labels for upload progress messages
@@ -769,9 +769,10 @@ upload_asset() {
             fi
         fi
 
-        # captures the upload API response body
-        local tmp_body
+        # captures the upload API response body and curl stderr
+        local tmp_body tmp_stderr
         tmp_body="$(mktemp)"
+        tmp_stderr="$(mktemp)"
         local start_ts http_code elapsed
 
         # record start time to compute elapsed seconds
@@ -779,8 +780,9 @@ upload_asset() {
 
         # Upload via the uploads.github.com endpoint (different host from api.github.com)
         # --data-binary preserves exact binary content; --speed-limit/--speed-time guard against stalls
+        # stderr is captured to tmp_stderr so curl errors are only printed on permanent failure
         http_code=$(
-            curl -S -L \
+            curl -sS -L \
                 --connect-timeout "${CURL_CONNECT_TIMEOUT}" \
                 --speed-limit "${UPLOAD_SPEED_LIMIT}" \
                 --speed-time "${UPLOAD_SPEED_TIME}" \
@@ -793,12 +795,13 @@ upload_asset() {
                 -H "Content-Type: ${mime_type}" \
                 --data-binary "@${file_path}" \
                 "${upload_url}?name=${encoded_name}" \
-                2>/dev/null
+                2>"${tmp_stderr}"
         )
         local curl_exit="${?}"
-        local response
+        local response curl_stderr_msg
         response="$(cat "${tmp_body}" 2>/dev/null)"
-        rm -f "${tmp_body}"
+        curl_stderr_msg="$(cat "${tmp_stderr}" 2>/dev/null)"
+        rm -f "${tmp_body}" "${tmp_stderr}"
 
         elapsed=$((SECONDS - start_ts))
 
@@ -825,6 +828,9 @@ upload_asset() {
                 wait_time=$((wait_time * 2))
                 continue
             fi
+            # Print the captured curl stderr on the final attempt to expose the root cause
+            [[ -n "${curl_stderr_msg}" ]] &&
+                echo -e "${WARN} │  (${file_index}/${total_files}) curl stderr: ${curl_stderr_msg}"
             echo -e "${WARN} └─ (${file_index}/${total_files}) Permanent failure: [ ${file_name} ] (${curl_reason} after ${UPLOAD_MAX_RETRY} attempts). Skipping."
             echo ""
             return 1
