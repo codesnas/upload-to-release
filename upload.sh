@@ -779,8 +779,10 @@ upload_asset() {
         start_ts="${SECONDS}"
 
         # Upload via the uploads.github.com endpoint (different host from api.github.com)
-        # --data-binary preserves exact binary content; --speed-limit/--speed-time guard against stalls
-        # stderr is captured to tmp_stderr so curl errors are only printed on permanent failure
+        # -T (--upload-file) streams the file directly from disk without loading it into memory,
+        # avoiding OOM on large files that --data-binary would cause by buffering the entire file.
+        # -X POST overrides the default PUT method so the GitHub upload API receives the correct verb.
+        # stderr is captured to tmp_stderr so curl errors are only printed on permanent failure.
         http_code=$(
             curl -sS -L \
                 --connect-timeout "${CURL_CONNECT_TIMEOUT}" \
@@ -793,7 +795,7 @@ upload_asset() {
                 -H "Authorization: Bearer ${gh_token}" \
                 -H "X-GitHub-Api-Version: 2022-11-28" \
                 -H "Content-Type: ${mime_type}" \
-                --data-binary "@${file_path}" \
+                -T "${file_path}" \
                 "${upload_url}?name=${encoded_name}" \
                 2>"${tmp_stderr}"
         )
