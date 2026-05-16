@@ -130,6 +130,16 @@ Unlike other release actions that produce no upload output, this action prints d
 
 ...
 [ SUCCESS ] Upload summary: [ 5 ] total, [ 5 ] succeeded, [ 0 ] failed, [ 0 ] skipped.
+
+[ STEPS ] Verifying upload integrity (SHA-256)...
+[ INFO  ] ────────────────────────────────────────────────────────────────────────
+[ SUCCESS ] OK   1/5 [ firmware-arm64.img.gz ]
+[ SUCCESS ] OK   2/5 [ firmware-x86.img.gz ]
+[ SUCCESS ] OK   3/5 [ checksums.sha256 ]
+[ SUCCESS ] OK   4/5 [ release-notes.md ]
+[ SUCCESS ] OK   5/5 [ version.txt ]
+[ INFO  ] ────────────────────────────────────────────────────────────────────────
+[ SUCCESS ] Integrity summary: [ 5 ] total, [ 5 ] passed, [ 0 ] failed, [ 0 ] skipped.
 ```
 
 A numbered file manifest is printed before uploading begins so you can see exactly which files are queued.
@@ -150,7 +160,7 @@ Results are printed as a pass/fail table. Verification failures are **non-fatal*
 - When `replaces_artifacts` is `true` and a file with the same name already exists, the old asset is deleted first and then re-uploaded.
 - `body_file` takes precedence over `body` when both are provided.
 - The action auto-detects and installs missing dependencies (`jq`, `curl`, `bc`, `file`) via `apt-get` if they are not already present.
-- If a single file upload is stuck (no data transferred for 60 s, or the per-file timeout is reached), the upload is automatically abandoned and the script moves on to the next file in the queue.
+- If a single file upload is stuck (speed below 1 KB/s for 60 s, or the per-file timeout is reached), the upload is automatically abandoned and the script moves on to the next file in the queue.
 - Setting `upload_timeout=0` disables only the per-file max-time limit. The stall guard (abort when speed < 1 KB/s for 60 s) stays active regardless.
 
 ## Links

@@ -69,7 +69,7 @@ CURL_SPEED_TIME="60"
 UPLOAD_MAX_TIME="600"
 # Abort an upload if speed stays below UPLOAD_SPEED_LIMIT bytes/s for UPLOAD_SPEED_TIME seconds
 UPLOAD_SPEED_LIMIT="1024"
-# Seconds to wait with no upload progress before aborting and retrying (stalled connection)
+# Seconds at speed below UPLOAD_SPEED_LIMIT before curl aborts the transfer
 UPLOAD_SPEED_TIME="60"
 
 # Maximum upload attempts per file (initial try + retries)
@@ -102,8 +102,8 @@ error_msg() {
 
 # Called automatically by "trap cleanup EXIT"; removes PID-named temp files on any exit.
 cleanup() {
-    rm -rf "${ASSETS_LIST_FILE}"
-    rm -rf "${UPLOAD_RESULTS_FILE}"
+    rm -f "${ASSETS_LIST_FILE}"
+    rm -f "${UPLOAD_RESULTS_FILE}"
 }
 
 # url_encode <string>
@@ -181,7 +181,7 @@ api_call() {
         # Send the request; -w '%{http_code}' writes only the status code to stdout;
         # the body goes to tmp_body via -o so both values can be captured independently
         api_http_code=$(
-            curl -s -L \
+            curl -sL \
                 --connect-timeout "${CURL_CONNECT_TIMEOUT}" \
                 --speed-limit "${CURL_SPEED_LIMIT}" \
                 --speed-time "${CURL_SPEED_TIME}" \
@@ -221,7 +221,9 @@ api_call() {
             return 0
         fi
 
-        # 429 = rate limited; pause for the full RATE_LIMIT_WAIT period before retrying
+        # 429 = rate limited; pause for the full RATE_LIMIT_WAIT period before retrying.
+        # attempt is already incremented at the top of the loop, so this still counts
+        # toward max_attempts — prevents an infinite loop if the server never stops rate-limiting.
         if [[ "${api_http_code}" == "429" ]]; then
             echo -e "${NOTE} (api_call) Rate limited (HTTP 429) on attempt ${attempt}/${max_attempts}, waiting ${RATE_LIMIT_WAIT}s..."
             sleep "${RATE_LIMIT_WAIT}"
@@ -371,7 +373,6 @@ init_var() {
     echo -e ""
 }
 
-# get_release
 # Queries the GitHub API for an existing release matching the configured tag.
 # Sets globals: release_id, upload_url, html_url (empty strings if not found).
 get_release() {
@@ -426,7 +427,6 @@ build_release_payload() {
         }'
 }
 
-# create_release
 # Creates a brand-new release for the configured tag via POST.
 # Populates globals: release_id, upload_url, html_url.
 create_release() {
@@ -449,7 +449,7 @@ create_release() {
         -H "Content-Type: application/json" \
         -d "${payload}"
 
-    # Check for successful creation (201 Created or 200 OK with existing release); extract release ID and upload URL from the response
+    # 201 Created on success (200 accepted as well for resilience)
     if [[ "${api_http_code}" =~ ^(200|201)$ ]]; then
         release_id="$(echo "${api_response}" | jq -r '.id')"
         # Strip RFC 6570 template suffix from upload_url (same as in get_release)
@@ -463,7 +463,6 @@ create_release() {
     fi
 }
 
-# update_release
 # Updates metadata (name, body, flags) of the already-existing release via PATCH.
 # Refreshes globals: upload_url, html_url.
 update_release() {
@@ -486,7 +485,7 @@ update_release() {
         -H "Content-Type: application/json" \
         -d "${payload}"
 
-    # Check for successful update (200 OK or 201 Created); extract refreshed upload URL and HTML URL from the response
+    # 200 OK on success (201 accepted as well for resilience)
     if [[ "${api_http_code}" =~ ^(200|201)$ ]]; then
         upload_url="$(echo "${api_response}" | jq -r '.upload_url' | sed 's/{?name,label}$//')"
         html_url="$(echo "${api_response}" | jq -r '.html_url')"
@@ -498,7 +497,6 @@ update_release() {
     fi
 }
 
-# ensure_release
 # Entry point for release setup: queries, then creates or updates based on configuration.
 # After this function returns, release_id and upload_url are guaranteed to be set.
 ensure_release() {
@@ -522,7 +520,6 @@ ensure_release() {
     echo -e ""
 }
 
-# expand_artifacts
 # Parses the comma-separated artifact patterns, expands globs, deduplicates,
 # and populates the global resolved_files array.
 # Prints a numbered file manifest with sizes before returning.
@@ -603,7 +600,6 @@ expand_artifacts() {
     echo -e ""
 }
 
-# fetch_assets_list
 # Fetches all existing asset records for the current release (paginated) and
 # writes one JSON object per line into ASSETS_LIST_FILE.
 # Format: {"id": <number>, "name": "<string>", "state": "<string>", "digest": "<string|null>"}
@@ -641,7 +637,7 @@ fetch_assets_list() {
         echo -e "${INFO} Current assets:\n$(cat "${ASSETS_LIST_FILE}")"
 }
 
-# delete_asset <asset_id> <asset_name>
+# delete_asset <asset_id> <asset_name> [file_index] [total_files]
 # Sends a DELETE request for the given asset; up to UPLOAD_MAX_RETRY attempts total.
 # Returns 0 on success (or 404 = already gone), 1 on permanent failure.
 # Optional 3rd/4th args: file_index and total_files — when provided, prefix log lines with (n/N).
@@ -682,7 +678,6 @@ delete_asset() {
     return 1
 }
 
-# remove_all_assets
 # Fetches the full asset list and deletes every entry.
 # Called only when remove_artifacts=true (bulk pre-upload clear).
 remove_all_assets() {
@@ -716,6 +711,7 @@ remove_all_assets() {
 # upload_asset <file_path> <file_index> <total_files>
 # Uploads one file to the release with retry on failure.
 # On success appends "filename=download_url" to UPLOAD_RESULTS_FILE.
+# Returns: 0 = success, 1 = permanent failure, 2 = skipped (replaces_artifacts=false).
 # On permanent failure logs an error and returns 1 (does NOT exit the script).
 upload_asset() {
     local file_path="${1}"
@@ -752,7 +748,14 @@ upload_asset() {
 
     # Initialize retry loop variables
     local attempt=0 wait_time="${RETRY_WAIT_INIT}"
-    # true when retrying after a 422 → delete cycle (not an error retry)
+    # replace_cycles counts 422-triggered delete-and-retry rounds.
+    # These are NOT charged against the error retry budget (attempt) because a 422
+    # means the upload endpoint rejected a duplicate name — not a transient failure.
+    # A separate cap prevents an infinite loop if a concurrent job keeps re-creating
+    # the asset between our delete and re-upload (extreme race condition).
+    local replace_cycles=0
+    local MAX_REPLACE_CYCLES=5
+    # true when the current iteration is a post-replace re-upload (not an error retry)
     local is_replace=false
 
     # Loop until upload succeeds or we exhaust retry attempts
@@ -760,16 +763,16 @@ upload_asset() {
         attempt=$((attempt + 1))
 
         # Distinguish a post-replace re-upload from a genuine error retry
-        if [[ "${attempt}" -gt 1 ]]; then
+        if [[ "${attempt}" -gt 1 || "${is_replace}" == "true" ]]; then
             if [[ "${is_replace}" == "true" ]]; then
-                echo -e "${NOTE} │  (${file_index}/${total_files}) Re-uploading after replace (attempt ${attempt}/${UPLOAD_MAX_RETRY})..."
+                echo -e "${NOTE} │  (${file_index}/${total_files}) Re-uploading after replace (replace cycle ${replace_cycles}/${MAX_REPLACE_CYCLES}, error attempt ${attempt}/${UPLOAD_MAX_RETRY})..."
                 is_replace=false
             else
                 echo -e "${NOTE} │  (${file_index}/${total_files}) Retry attempt ${attempt}/${UPLOAD_MAX_RETRY}..."
             fi
         fi
 
-        # captures the upload API response body and curl stderr
+        # Temp files for the response body and curl stderr
         local tmp_body tmp_stderr
         tmp_body="$(mktemp)"
         tmp_stderr="$(mktemp)"
@@ -784,7 +787,7 @@ upload_asset() {
         # -X POST overrides the default PUT method so the GitHub upload API receives the correct verb.
         # stderr is captured to tmp_stderr so curl errors are only printed on permanent failure.
         http_code=$(
-            curl -sS -L \
+            curl -sSL \
                 --connect-timeout "${CURL_CONNECT_TIMEOUT}" \
                 --speed-limit "${UPLOAD_SPEED_LIMIT}" \
                 --speed-time "${UPLOAD_SPEED_TIME}" \
@@ -815,7 +818,7 @@ upload_asset() {
             local curl_reason="network error"
             if [[ "${curl_exit}" -eq 28 ]]; then
                 if [[ "${UPLOAD_MAX_TIME}" -eq 0 ]]; then
-                    curl_reason="stall timeout (no data for ${UPLOAD_SPEED_TIME}s)"
+                    curl_reason="stall timeout (speed < ${UPLOAD_SPEED_LIMIT}B/s for ${UPLOAD_SPEED_TIME}s)"
                 else
                     curl_reason="upload timeout (exceeded ${upload_timeout} min)"
                 fi
@@ -854,7 +857,13 @@ upload_asset() {
         # ── HTTP 422: asset with this name already exists on the release ──
         if [[ "${http_code}" == "422" ]]; then
             if [[ "${replaces_artifacts}" == "true" ]]; then
-                echo -e "${INFO} │  (${file_index}/${total_files}) Asset [ ${file_name} ] already exists; replacing (attempt ${attempt}/${UPLOAD_MAX_RETRY})..."
+                replace_cycles=$((replace_cycles + 1))
+                if [[ "${replace_cycles}" -gt "${MAX_REPLACE_CYCLES}" ]]; then
+                    echo -e "${WARN} └─ (${file_index}/${total_files}) Asset [ ${file_name} ] still conflicting after ${MAX_REPLACE_CYCLES} replace cycles (concurrent upload race). Skipping."
+                    echo ""
+                    return 1
+                fi
+                echo -e "${INFO} │  (${file_index}/${total_files}) Asset [ ${file_name} ] already exists; replacing (replace cycle ${replace_cycles}/${MAX_REPLACE_CYCLES}, error attempt ${attempt}/${UPLOAD_MAX_RETRY})..."
                 fetch_assets_list
                 local existing_id
                 existing_id="$(jq -r --arg n "${file_name}" \
@@ -863,8 +872,10 @@ upload_asset() {
                     delete_asset "${existing_id}" "${file_name}" "${file_index}" "${total_files}"
                 fi
 
-                # Mark as replace so the next loop iteration prints a clearer message
+                # Mark as replace so the next loop iteration prints a clearer message.
+                # Decrement attempt so this replace cycle does NOT consume an error retry slot.
                 is_replace=true
+                attempt=$((attempt - 1))
                 # Re-upload immediately — no sleep needed after a delete
                 continue
             else
@@ -876,6 +887,8 @@ upload_asset() {
         fi
 
         # ── HTTP 429: server-side rate limit on the upload endpoint ──────
+        # attempt is already incremented at the top of the loop, so this still counts
+        # toward UPLOAD_MAX_RETRY — prevents an infinite loop if throttling persists.
         if [[ "${http_code}" == "429" ]]; then
             echo -e "${NOTE} │  (${file_index}/${total_files}) Rate limited, waiting ${RATE_LIMIT_WAIT}s... (attempt ${attempt}/${UPLOAD_MAX_RETRY})"
             sleep "${RATE_LIMIT_WAIT}"
@@ -923,7 +936,6 @@ cleanup_partial_upload() {
     fi
 }
 
-# upload_all_assets
 # Iterates resolved_files in order, calls upload_asset for each, and prints a summary.
 # A failed file is skipped (upload_asset returns 1) but does not stop the remaining uploads.
 upload_all_assets() {
@@ -961,7 +973,8 @@ upload_all_assets() {
         for file_path in "${resolved_files[@]}"; do
             local fname
             fname="$(basename "${file_path}")"
-            grep -q "^${fname}=" "${UPLOAD_RESULTS_FILE}" 2>/dev/null ||
+            # Use -F (fixed string) so filenames with regex special chars (. + [ etc.) match literally
+            grep -qF "${fname}=" "${UPLOAD_RESULTS_FILE}" 2>/dev/null ||
                 echo -e "${NOTE}   - ${fname}"
         done
     fi
@@ -972,7 +985,6 @@ upload_all_assets() {
     [[ "${up_success}" -eq 0 ]] && error_msg "All [ ${total} ] file(s) failed or were skipped. Aborting."
 }
 
-# verify_uploads
 # For each successfully uploaded file, computes the local SHA-256 checksum and
 # compares it against the value returned by the GitHub Releases assets API.
 #
@@ -1074,23 +1086,25 @@ verify_uploads() {
     echo -e ""
 }
 
-# set_action_outputs
 # Builds the assets JSON map from UPLOAD_RESULTS_FILE and writes all four
 # output variables (release_id, html_url, upload_url, assets) to GITHUB_OUTPUT.
 set_action_outputs() {
-    # Build a JSON object mapping filename → download URL from the results file
+    # Build a JSON object mapping filename → download URL from the results file.
+    # Each line has the form:  filename=https://...  (first '=' is the delimiter;
+    # download URLs may contain '=' in query parameters so we split on the first only).
+    # A single jq invocation handles all lines at once, avoiding one subprocess per file.
     local assets_json="{}"
     if [[ -s "${UPLOAD_RESULTS_FILE}" ]]; then
-        # Split on the first '=' only; download URLs may contain '=' in query parameters
-        while IFS= read -r line; do
-            local fname furl
-            fname="${line%%=*}"
-            furl="${line#*=}"
-            [[ -z "${fname}" || -z "${furl}" ]] && continue
-            # jq incrementally adds each key-value pair to the accumulator object
-            assets_json="$(echo "${assets_json}" |
-                jq -c --arg k "${fname}" --arg v "${furl}" '. + {($k): $v}')"
-        done <"${UPLOAD_RESULTS_FILE}"
+        assets_json="$(
+            jq -Rsc '
+                [split("\n")[] | select(length > 0) |
+                 { key: (index("=") as $i | .[:$i]),
+                   value: (index("=") as $i | .[$i+1:]) }
+                ] | from_entries
+            ' "${UPLOAD_RESULTS_FILE}"
+        )"
+        # Fall back to empty object on jq failure (e.g. malformed file)
+        [[ -z "${assets_json}" ]] && assets_json="{}"
     fi
 
     echo -e "${INFO} Writing action outputs..."

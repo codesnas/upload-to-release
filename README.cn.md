@@ -132,6 +132,16 @@ jobs:
 
 ...
 [ SUCCESS ] Upload summary: [ 5 ] total, [ 5 ] succeeded, [ 0 ] failed, [ 0 ] skipped.
+
+[ STEPS ] Verifying upload integrity (SHA-256)...
+[ INFO  ] ────────────────────────────────────────────────────────────────────────
+[ SUCCESS ] OK   1/5 [ firmware-arm64.img.gz ]
+[ SUCCESS ] OK   2/5 [ firmware-x86.img.gz ]
+[ SUCCESS ] OK   3/5 [ checksums.sha256 ]
+[ SUCCESS ] OK   4/5 [ release-notes.md ]
+[ SUCCESS ] OK   5/5 [ version.txt ]
+[ INFO  ] ────────────────────────────────────────────────────────────────────────
+[ SUCCESS ] Integrity summary: [ 5 ] total, [ 5 ] passed, [ 0 ] failed, [ 0 ] skipped.
 ```
 
 上传开始前还会打印编号文件清单，方便提前确认上传队列中的所有文件。
@@ -152,7 +162,7 @@ jobs:
 - 当 `replaces_artifacts` 为 `true` 且已存在同名文件时，系统会先删除旧资产，再重新上传。
 - 同时提供 `body_file` 和 `body` 时，`body_file` 优先生效。
 - 本 Action 会自动检测并通过 `apt-get` 安装缺失的依赖（`jq`、`curl`、`bc`、`file`）。
-- 若某个文件上传卡住（连续 60 秒无数据传输，或超过 `upload_timeout` 设定的时限），上传任务会自动放弃当前文件并继续处理队列中的下一个文件。
+- 若某个文件上传卡住（速度连续 60 秒低于 1 KB/s，或超过 `upload_timeout` 设定的时限），上传任务会自动放弃当前文件并继续处理队列中的下一个文件。
 - 将 `upload_timeout` 设为 `0` 仅禁用单文件最大时限，防卡死速度守卫仍然有效——上传速度连续 60 秒低于 1 KB/s 时仍会自动放弃。
 
 ## 相关链接
