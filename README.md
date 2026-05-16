@@ -148,8 +148,8 @@ A numbered file manifest is printed before uploading begins so you can see exact
 
 After all uploads complete, the action automatically verifies each file using **SHA-256**:
 
-1. The GitHub Releases API returns a `digest` field (`sha256:<hex>`) for assets uploaded with the 2022-11-28 API version — verification is performed directly against this value, with no extra download needed.
-2. If the `digest` field is absent (older releases), the file is **skipped** rather than downloaded — verification is only performed when the API supplies the checksum.
+1. The GitHub Releases API returns a `digest` field (`sha256:<hex>`) for assets uploaded with the 2022-11-28 API version — the verification uses this value directly.
+2. If the `digest` field is absent (older releases), the file is **skipped** — verification is only performed when the API supplies the checksum.
 
 Results are printed as a pass/fail table. Verification failures are **non-fatal** — the step still succeeds as long as at least some files uploaded correctly.
 
@@ -159,7 +159,6 @@ Results are printed as a pass/fail table. Verification failures are **non-fatal*
 - `remove_artifacts: true` deletes **all** existing assets before uploading; use with care.
 - When `replaces_artifacts` is `true` and a file with the same name already exists, the old asset is deleted first and then re-uploaded.
 - `body_file` takes precedence over `body` when both are provided.
-- The action auto-detects and installs missing dependencies (`jq`, `curl`, `bc`, `file`) via `apt-get` if they are not already present.
 - If a single file upload is stuck (speed below 1 KB/s for 60 s, or the per-file timeout is reached), the upload is automatically abandoned and the script moves on to the next file in the queue.
 - Setting `upload_timeout=0` disables only the per-file max-time limit. The stall guard (abort when speed < 1 KB/s for 60 s) stays active regardless.
 
